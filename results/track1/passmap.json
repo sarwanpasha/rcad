@@ -1,0 +1,14 @@
+{
+  "mammography": {
+    "0.0": true,
+    "0.05": true,
+    "0.1": true,
+    "0.2": true
+  },
+  "satellite": {
+    "0.0": true,
+    "0.05": true,
+    "0.1": true,
+    "0.2": true
+  }
+}

@@ -1,0 +1,19 @@
+columns: ['rule', 'coverage', 'cov_lcb90', 'power', 'power_lcb90', 'threshold', 'experiment', 'detector', 'dataset', 'seed', 'cal_eps', 'n_ref', 'eps_hat', 'eps_true']
+n_ref values: [np.int64(40), np.int64(80), np.int64(160), np.int64(320)]
+rules: ['Auto', 'Robust', 'Standard']
+
+=== detector=isolation_forest ===
+                coverage  power  eps_hat
+rule     n_ref                          
+Auto     40        0.931  0.267    0.043
+         80        0.936  0.290    0.031
+         160       0.923  0.325    0.047
+         320       0.939  0.526    0.052
+Robust   40        0.869  0.408    0.043
+         80        0.869  0.408    0.031
+         160       0.869  0.408    0.047
+         320       0.887  0.638    0.052
+Standard 40        0.969  0.065    0.043
+         80        0.969  0.065    0.031
+         160       0.969  0.065    0.047
+         320       0.998  0.058    0.052

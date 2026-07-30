@@ -1,0 +1,13 @@
+config,detector,cal_eps,clean_power_meanseed,poison_frac_above_calmax,poison_pctl_in_cal
+clipvit_cifar10_c1,knn,0.00,0.915,nan,nan
+clipvit_cifar10_c1,knn,0.20,0.915,0.141,0.990
+clipvit_cifar10_c1,maha,0.00,0.763,nan,nan
+clipvit_cifar10_c1,maha,0.20,0.766,0.115,0.964
+clipvit_cifar10_c9,knn,0.00,0.935,nan,nan
+clipvit_cifar10_c9,knn,0.20,0.928,0.244,0.989
+clipvit_cifar10_c9,maha,0.00,0.732,nan,nan
+clipvit_cifar10_c9,maha,0.20,0.739,0.060,0.962
+minilm_news20_c7,knn,0.00,0.373,nan,nan
+minilm_news20_c7,knn,0.20,0.377,0.005,0.848
+minilm_news20_c7,maha,0.00,0.159,nan,nan
+minilm_news20_c7,maha,0.20,0.154,0.001,0.629
