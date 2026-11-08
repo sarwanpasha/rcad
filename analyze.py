@@ -15,9 +15,11 @@ import glob, os, sys
 import numpy as np, pandas as pd
 
 OUT = "results_drift/tables"; os.makedirs(OUT, exist_ok=True)
-MAIN = ["standard", "ref_only", "naive_trim", "rcad_u", "qtc", "weighted", "aci", "nexcp", "robust_kl",
-        "mad_filter", "drcc_affine", "drcc", "drcc_safe", "oracle"]
-ABL = ["drcc", "drcc_affine", "drcc_single", "drcc_auto", "drcc_unioncorr", "drcc_B10", "drcc_B40", "drcc_safe"]
+MAIN = ["standard", "ref_only", "naive_trim", "rcad", "eps_corr", "rps", "rps_mv", "cdc", "cdc_plugin", "rcad_u", "qtc",
+        "weighted", "aci", "nexcp", "robust_kl", "mad_filter", "drcc_affine", "drcc", "drcc_safe",
+        "drcc_auto_hist", "oracle"]
+ABL = ["drcc", "drcc_affine", "drcc_single", "drcc_auto", "drcc_unioncorr", "drcc_B10", "drcc_B40",
+       "drcc_lam025", "drcc_lam1", "drcc_delta01", "drcc_delta10", "drcc_iters2", "drcc_L15", "drcc_normal", "drcc_safe"]
 _gb = pd.DataFrame.groupby
 pd.DataFrame.groupby = lambda self, *a, **k: _gb(self, *a, **{"observed": True, **k})
 _pt = pd.DataFrame.pivot_table
@@ -82,6 +84,27 @@ def seed_ci(d, cell, by, rules, seed_col="seed"):
     return pd.DataFrame(rows)
 
 
+def viol_ci(d, cell, by, rules, seed_col="seed", B=400, seed=0):
+    """95% CI of the violation rate: bootstrap over seeds (clusters), recomputing the
+    per-cell seed average and the fraction of cells above 1.2 alpha."""
+    d = d[d.rule.isin(rules)]
+    rows = []
+    rng = np.random.default_rng(seed)
+    seeds = np.array(sorted(set(d[seed_col].tolist())))
+    for key, s in d.groupby(by + ["rule"]):
+        piv = s.pivot_table(index=cell, columns=seed_col, values="typeI", aggfunc="mean")
+        A = piv.reindex(columns=seeds).to_numpy(float)
+        a = np.asarray(piv.index.get_level_values("alpha"), float) if "alpha" in piv.index.names else 0.10
+        vals = []
+        for _ in range(B):
+            cols = rng.integers(0, seeds.size, seeds.size)
+            mu = np.nanmean(A[:, cols], axis=1)
+            vals.append(np.nanmean(mu > 1.2 * a))
+        rows.append(dict(zip(by + ["rule"], key if isinstance(key, tuple) else (key,)),
+                         viol_lo=float(np.quantile(vals, 0.025)), viol_hi=float(np.quantile(vals, 0.975))))
+    return pd.DataFrame(rows)
+
+
 def real(exp):
     d = load(exp)
     if d is None:
@@ -96,6 +119,7 @@ def real(exp):
     t = cell_table(m, cell, ["dataset"], MAIN)
     ci = seed_ci(m, cell, ["dataset"], MAIN)
     t = t.merge(ci, on=["dataset", "rule"], how="left")
+    t = t.merge(viol_ci(m, cell, ["dataset"], MAIN), on=["dataset", "rule"], how="left")
     t.to_csv(f"{OUT}/main_{exp}.csv", index=False)
     print(f"\n######## {exp}: main (alpha 0.10)  maxI / viol / meanI [95% CI] / dpow")
     for ds, s in t.groupby("dataset"):
@@ -111,7 +135,8 @@ def real(exp):
     print(ta.pivot_table(index=["dataset", "alpha"], columns="rule", values="viol").reindex(
         columns=[x for x in MAIN if x in set(ta.rule)]).round(2).to_string())
     # detector
-    td = cell_table(m, cell, ["dataset", "detector"], ["standard", "drcc", "drcc_safe", "drcc_affine", "aci", "mad_filter", "oracle"])
+    td = cell_table(m, cell, ["dataset", "detector"], ["standard", "drcc", "drcc_safe", "drcc_affine", "drcc_auto_hist",
+                                                       "rps", "rps_mv", "eps_corr", "cdc_plugin", "aci", "mad_filter", "oracle"])
     td.to_csv(f"{OUT}/detector_{exp}.csv", index=False)
     # ablation
     if "drcc_single" in set(d.rule):
@@ -149,6 +174,10 @@ def real(exp):
         hi = to[to.attack == "opt_hi"].pivot_table(index=["dataset", "eps"], columns="target", values="dP").round(3)
         print("type-I under opt_lo\n" + lo.to_string()); print("power gap under opt_hi\n" + hi.to_string())
     if exp == "H":
+        # reference age: stale protocol, per period (the period index is the age of the reference)
+        st = m[m.protocol == "stale"]
+        tg = cell_table(st, cell, ["dataset", "window"], ["standard", "drcc", "drcc_safe", "drcc_affine", "drcc_auto_hist", "oracle"])
+        tg.to_csv(f"{OUT}/age_H.csv", index=False)
         tl = m[(m.attack.isin(["none", "band"])) & (m.eps.isin([0.0, 0.10])) & (m["mode"] == "score") &
                m.rule.isin(["standard", "drcc", "drcc_safe", "oracle"])]
         tl.groupby(["dataset", "protocol", "window", "attack", "eps", "rule"])[["typeI", "power"]].mean().reset_index() \
@@ -166,6 +195,41 @@ def synth():
         cell = [c for c in ("base", "drift", "sev", "alpha", "attack", "q", "spread", "stretch", "eps") if c in d]
         t = cell_table(d, cell, [], MAIN); t.to_csv(f"{OUT}/main_{p}.csv", index=False)
         print(f"\n######## {p}"); print(t.set_index("rule").reindex([x for x in MAIN if x in set(t.rule)]).round(3).to_string())
+    for p, by in (("Jsize", ["m", "n_ref"]), ("Aage", ["drift", "sev"]), ("Cref", ["eps_ref", "ref_kind"])):
+        d = load(p)
+        if d is None:
+            continue
+        for c in ("q", "spread", "stretch"):
+            if c in d:
+                d[c] = d[c].astype(float).fillna(-1)
+        cell = [c for c in ("base", "drift", "sev", "alpha", "attack", "q", "eps", "m", "n_ref", "eps_ref", "ref_kind") if c in d]
+        if "ref_kind" in d:
+            d["ref_kind"] = d["ref_kind"].astype(str).replace("nan", "none")
+        rules = ["standard", "rps", "rps_mv", "eps_corr", "cdc_plugin", "drcc_affine", "drcc", "drcc_safe", "drcc_auto_hist", "oracle"]
+        t = cell_table(d, cell, [b for b in by if b in d], rules); t.to_csv(f"{OUT}/{p}.csv", index=False)
+        print(f"\n######## {p}: viol / dpow")
+        print(t.pivot_table(index=[b for b in by if b in d], columns="rule", values="viol").round(3).to_string())
+        print(t.pivot_table(index=[b for b in by if b in d], columns="rule", values="dpow").round(3).to_string())
+    d = load("Jknob")
+    if d is not None:
+        for c in ("q", "spread", "stretch"):
+            if c in d:
+                d[c] = d[c].astype(float).fillna(-1)
+        cell = ["base", "drift", "sev", "alpha", "attack", "q", "eps"]
+        rows = []
+        for v, s in d.groupby("variant"):
+            t = cell_table(s, cell, [], ["drcc", "drcc_safe", "drcc_affine", "oracle"]); t["variant"] = v; rows.append(t)
+        t = pd.concat(rows); t.to_csv(f"{OUT}/knobs.csv", index=False)
+        print("\n######## knobs: viol / dpow")
+        print(t.pivot_table(index="variant", columns="rule", values=["viol", "dpow"]).round(3).to_string())
+    d = load("Pbud")
+    if d is not None:
+        d["dP"] = d.power - d.power_or
+        t = d.groupby(["iters", "eps", "direction", "rule"])[["typeI", "dP"]].mean().reset_index()
+        t.to_csv(f"{OUT}/budget.csv", index=False)
+        print("\n######## budget: type-I (lo) and power gap (hi)")
+        print(t[t.direction == "lo"].pivot_table(index=["eps", "iters"], columns="rule", values="typeI").round(3).to_string())
+        print(t[t.direction == "hi"].pivot_table(index=["eps", "iters"], columns="rule", values="dP").round(3).to_string())
     d = load("Teps")
     if d is not None:
         d["q"] = d["q"].fillna(-1)

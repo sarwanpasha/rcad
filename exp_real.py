@@ -41,7 +41,7 @@ def run_opt(base, R, w, rng, alpha=0.10):
     nanparts = dict(E=np.nan, flagged=np.nan, a=np.nan, b=np.nan, family="")
     for eps, direction, rule in itertools.product(OPT_EPS, ("lo", "hi"), AO.RULES):
         Wc, isp = AO.opt_attack(rule, R, w["W"], eps, direction, rng, alpha=alpha)
-        th = {rule: AO.RULES[rule](R, Wc, alpha), "oracle": conf_q(Wc[~isp], alpha)}
+        th = {rule: AO.RULES[rule](R, Wc, alpha, eps), "oracle": conf_q(Wc[~isp], alpha)}
         d = dict(base); d.update(window=w["tag"], protocol=w.get("protocol", "stale"), attack="opt_" + direction,
                                  target=rule, q=np.nan, spread=np.nan, stretch=np.nan, eps=eps, mode="score",
                                  alpha=alpha, n_tn=len(w["tn"]), n_ta=0 if w["ta"] is None else len(w["ta"]))
@@ -72,7 +72,8 @@ def run_windows(base, R, refX, wins, attacks, rng, modes=("score", "feasible"), 
                     winX = w["WX"].copy()
                     if picked is not None and len(idx):
                         winX[idx] = w["candX"][picked]
-                th, parts = all_thresholds(R, Wc, isp, alpha, eps, ref_X=refX_w, win_X=winX)
+                th, parts = all_thresholds(R, Wc, isp, alpha, eps, ref_X=refX_w, win_X=winX,
+                                           R_prev=w.get("R_prev"))
                 gap = np.nan
                 if picked is not None and len(idx):
                     gap = float(np.mean(np.abs(np.sort(Wc[isp]) - np.sort(w["cand_scores"][picked]))))
@@ -194,11 +195,12 @@ def expH_unit(D, det, seed, old_periods=(0,)):
         WX = T(X[win])
         wd = dict(tag=tag, W=score_fn(WX), WX=WX, tn=score_fn(T(X[tst])),
                   ta=score_fn(T(X[a_tst])) if a_tst.size >= 10 else None,
-                  cand_scores=score_fn(candX), candX=candX, protocol="stale")
+                  cand_scores=score_fn(candX), candX=candX, protocol="stale",
+                  R_prev=score_fn(T(X[prev])) if prev is not None else None)
         wins.append(wd)
         # chained protocol: the reference is a vetted clean sample of the previous period
         if prev is not None:
-            wins.append(dict(wd, protocol="chain", R=score_fn(T(X[prev])), refX=T(X[prev])))
+            wins.append(dict(wd, protocol="chain", R=score_fn(T(X[prev])), refX=T(X[prev]), R_prev=None))
         if p not in old_periods:
             rest = nn[M:]
             prev = rest[-NREF:] if rest.size >= 100 else None

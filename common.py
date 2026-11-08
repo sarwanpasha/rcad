@@ -163,6 +163,6 @@ def rows_for(base, th, parts, tn, ta):
         d = dict(base); d.update(rule=r, typeI=fa, power=pw, theta=th[r])
         if r == "drcc":
             d.update(E_hat=parts["E"], flagged=parts["flagged"], map_a=parts["a"], map_b=parts["b"],
-                     family=parts.get("family", "affine"))
+                     family=parts.get("family", "affine"), Ec=parts.get("Ec", np.nan), Pund=parts.get("Pund", np.nan))
         rows.append(d)
     return rows

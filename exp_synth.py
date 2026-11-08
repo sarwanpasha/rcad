@@ -50,7 +50,7 @@ def laws(base, fam, d, seed=12345, n=400_000):
     return clean, anom
 
 
-def run_configs(cfgs, trials, out, drcc_kw_list=None, m=200, n_ref=200):
+def run_configs(cfgs, trials, out, drcc_kw_list=None, m=200, n_ref=200, eps_ref=0.0, ref_kind="top"):
     rows = []; t0 = time.time(); cache = {}
     for ci, (base, fam, d, alpha, kind, q, sp, st, eps, m_, nref_) in enumerate(cfgs):
         key = (base, fam, d)
@@ -60,14 +60,18 @@ def run_configs(cfgs, trials, out, drcc_kw_list=None, m=200, n_ref=200):
         for t in range(trials):
             rng = np.random.default_rng([zlib.crc32(repr(key).encode()), zlib.crc32(repr(cfgs[ci]).encode()), t])
             R = base_draw(base, rng, nref_)
+            if eps_ref > 0:                        # the reference itself is partly poisoned
+                R, _, _, _ = make_poison(ref_kind, rng, eps_ref, R, q=0.9, spread=0.05)
             W = drift_map(fam, d, rng, m_, base)
+            R_prev = drift_map(fam, d, rng, nref_, base)   # vetted sample of the previous period (same law)
             Wc, isp, _, _ = make_poison(kind, rng, eps, W, q=q, spread=sp or 0.05, stretch=st or 1.6)
             for kwname, kw in (drcc_kw_list or [("default", None)]):
-                th, parts = all_thresholds(R, Wc, isp, alpha, eps, drcc_kw=kw)
+                th, parts = all_thresholds(R, Wc, isp, alpha, eps, drcc_kw=kw, R_prev=R_prev)
                 if kwname != "default":
-                    th = {"drcc": th["drcc"], "drcc_safe": th["drcc_safe"], "oracle": th["oracle"], "standard": th["standard"]}
+                    th = {k_: th[k_] for k_ in ("drcc", "drcc_safe", "drcc_affine", "oracle", "standard")}
                 base_d = dict(base=base, drift=fam, sev=d, alpha=alpha, attack=kind, q=q, spread=sp,
-                              stretch=st, eps=eps, m=m_, n_ref=nref_, trial=t, variant=kwname)
+                              stretch=st, eps=eps, m=m_, n_ref=nref_, trial=t, variant=kwname,
+                              eps_ref=eps_ref, ref_kind=ref_kind if eps_ref > 0 else "")
                 rows += rows_for(base_d, th, parts, tn, ta)
         if ci % 20 == 0:
             print(f"cfg {ci}/{len(cfgs)}  {time.time()-t0:.0f}s", flush=True)
@@ -117,7 +121,10 @@ DRCC_VARIANTS = [("default", None)] + \
     [("single", dict(init="single", transport="affine")), ("e0", dict(init="e0", transport="affine")),
      ("affine", dict(transport="affine")), ("auto", dict(transport="auto")),
      ("union_corr", dict(transport="union")), ("guard_k3", dict(transport="guard"))] + \
-    [(f"gam{g}", dict(gam=g, transport="auto")) for g in (0.05, 0.20)]
+    [(f"gam{g}", dict(gam=g, transport="auto")) for g in (0.05, 0.20)] + \
+    [(f"L{L}", dict(npts=L)) for L in (15, 60)] + \
+    [("knots_alt", dict(knots_raw=[0.10, 0.30, 0.50, 0.70, 0.90], knots_corr=[0.10, 0.30, 0.50, 0.70, 0.90])),
+     ("scan_normal", dict(scan="normal"))]
 
 
 def cfgs_J_knobs():
@@ -140,6 +147,54 @@ def cfgs_T_eps():
     return sorted(set(out), key=str)
 
 
+def cfgs_A_age():
+    """Reference age: drift severity grows with the age of the stale reference."""
+    out = []
+    for base, fam in itertools.product(BASES, ("affine", "tailstretch", "mixture")):
+        for d in (0.5, 1, 2, 3, 4):
+            for kind, q in (("none", None), ("top", None), ("bottom", None), ("band", 0.5), ("band", 0.9)):
+                for eps in ((0.0,) if kind == "none" else (0.10, 0.20)):
+                    out.append((base, fam, d, 0.10, kind, q, 0.05, None, eps, 200, 200))
+    return out
+
+
+def cfgs_C_refcont():
+    """Reference contamination: the vetted reference carries a fraction eps_ref of poison."""
+    out = []
+    for base, (fam, d) in itertools.product(BASES, [("none", 0), ("affine", 2), ("tailstretch", 2)]):
+        for kind, q in (("none", None), ("top", None), ("band", 0.5), ("band", 0.9)):
+            for eps in ((0.0,) if kind == "none" else (0.10, 0.20)):
+                out.append((base, fam, d, 0.10, kind, q, 0.05, None, eps, 200, 200))
+    return out
+
+
+def run_budget(task, ntask, trials, out):
+    """Convergence of the white-box search: attacked type-I / power vs search budget."""
+    import attacks_opt as AO
+    from baselines import conf_q
+    rules = ("standard", "drcc", "drcc_safe", "drcc_affine", "rps_mv", "eps_corr")
+    units = list(itertools.product(BASES, [("none", 0), ("affine", 2)], (0.10, 0.20), ("lo", "hi"),
+                                   (30, 120, 480, 1920)))[task::ntask]
+    rows = []; t0 = time.time(); cache = {}
+    for base, (fam, d), eps, direction, iters in units:
+        key = (base, fam, d)
+        if key not in cache:
+            cache[key] = laws(base, fam, d)
+        tn, ta = cache[key]
+        ti = lambda x: 1 - np.searchsorted(tn, x, "right") / tn.size
+        pw = lambda x: 1 - np.searchsorted(ta, x, "right") / ta.size
+        for t in range(trials):
+            rng = np.random.default_rng([zlib.crc32(repr((key, eps, direction)).encode()), t])
+            R = base_draw(base, rng, 200); W = drift_map(fam, d, rng, 200, base)
+            for rule in rules:
+                Wc, isp = AO.opt_attack(rule, R, W, eps, direction, np.random.default_rng([t, iters]), iters=iters)
+                th = AO.RULES[rule](R, Wc, 0.10, eps); o = conf_q(Wc[~isp], 0.10)
+                rows.append(dict(base=base, drift=fam, sev=d, eps=eps, direction=direction, iters=iters, trial=t,
+                                 rule=rule, typeI=ti(th), power=pw(th), typeI_or=ti(o), power_or=pw(o)))
+        print(base, fam, eps, direction, iters, f"{time.time()-t0:.0f}s", flush=True)
+    pd.DataFrame(rows).to_csv(out, index=False)
+
+
 def run_topt(task, ntask, trials, out):
     """Theory check 2: white-box targeted attacks against each rule, eps grid."""
     import attacks_opt as AO
@@ -157,7 +212,7 @@ def run_topt(task, ntask, trials, out):
             R = base_draw(base, rng, 200); W = drift_map(fam, d, rng, 200, base)
             for rule in AO.RULES:
                 Wc, isp = AO.opt_attack(rule, R, W, eps, direction, rng)
-                th = AO.RULES[rule](R, Wc, 0.10)
+                th = AO.RULES[rule](R, Wc, 0.10, eps)
                 o = conf_q(Wc[~isp], 0.10)
                 ti = lambda x: 1 - np.searchsorted(tn, x, "right") / tn.size
                 pw = lambda x: 1 - np.searchsorted(ta, x, "right") / ta.size
@@ -188,4 +243,14 @@ if __name__ == "__main__":
         run_configs(cf, trials, f"results_drift/Teps_{task:02d}.csv")
     elif exp == "O":
         run_topt(task, ntask, trials, f"results_drift/Topt_{task:02d}.csv")
+    elif exp == "A":                                       # reference age
+        cf = cfgs_A_age()[task::ntask]
+        run_configs(cf, trials, f"results_drift/Aage_{task:02d}.csv")
+    elif exp == "C":                                       # contaminated reference
+        cf = cfgs_C_refcont()[task::ntask]
+        for er in (0.02, 0.05, 0.10):
+            for rk in ("top", "band"):
+                run_configs(cf, trials, f"results_drift/Cref_{task:02d}_{rk}{int(er*100):02d}.csv", eps_ref=er, ref_kind=rk)
+    elif exp == "P":                                       # white-box search budget
+        run_budget(task, ntask, trials, f"results_drift/Pbud_{task:02d}.csv")
     print("done")

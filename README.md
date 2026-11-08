@@ -14,13 +14,13 @@ for the synthetic and real-data experiments.
 
 | file | content |
 |---|---|
-| `drcc.py` | DRCC: robust affine and piecewise-linear transport fits, binned excess scan with an exact tail test, keep-weights and weighted conformal threshold (`theta_drcc`, default `transport="union3"`), safe variant |
-| `baselines.py` | all calibration rules (`all_thresholds`): standard split conformal, reference-only, pooled, trimming, weighted conformal, ACI, NexCP, KL-robust conformal, MAD filter, DRCC-affine, DRCC, DRCC-safe, oracle; `ABLATE=1` adds DRCC ablations |
+| `drcc.py` | DRCC: robust affine and piecewise-linear transport fits, binned excess scan with exact beta-binomial bin tests (`DRCC_SCAN=normal` switches to the normal approximation), keep-weights and weighted conformal threshold (`theta_drcc`, default `transport="union3"`), safe variant |
+| `baselines.py` | all calibration rules (`all_thresholds`): standard split conformal, reference-only, pooled, trimming, budget-corrected rank, weighted conformal, ACI, NexCP, KL-robust conformal, MAD filter, contamination-corrected calibration (CDC, as published and plug-in), reliable prediction sets (RPS) and a majority-vote variant (RPS-MV), DRCC-affine, DRCC, DRCC-safe, DRCC-auto (chooses DRCC or DRCC-safe from a previous vetted sample), oracle; `ABLATE=1` adds DRCC ablations |
 | `attacks.py`, `common.py` | oblivious poisoning in score space and with real inputs, detectors (kNN, Mahalanobis, Deep SVDD and the classical detectors), per-rule metrics |
 | `attacks_opt.py` | white-box attacks optimized against each rule (`opt_lo` lowers the threshold, `opt_hi` raises it) |
 | `rcad.py` | tabular datasets, classical detectors (IF, LOF, OCSVM, ECOD, autoencoder) and simple calibration rules |
 | `data_drift.py` | real drift streams: gas sensors (UCI), credit card (OpenML), news headlines, arXiv abstracts, degraded CIFAR-10 (ResNet-18 features), CIC-IDS2017 |
-| `exp_synth.py` | synthetic experiments: `F` main grid, `I` dense adaptive attacks, `J` sample sizes, `K` knob ablation, `T` poison fraction around alpha, `O` white-box attacks |
+| `exp_synth.py` | synthetic experiments: `F` main grid, `I` dense adaptive attacks, `J` sample sizes, `K` knob ablation, `T` poison fraction around alpha, `A` reference age (drift severity), `C` contaminated reference, `O` white-box attacks, `P` white-box search budget |
 | `exp_real.py` | `G` tabular benchmarks with injected drift, `H` real streams |
 | `runtime.py` | wall-clock cost per rule and window size |
 | `analyze.py`, `fig_data.py` | summary tables in `results_drift/tables/` |
@@ -58,11 +58,15 @@ TRIALS=200 python exp_synth.py I 0 1
 TRIALS=200 python exp_synth.py J 0 1
 TRIALS=200 python exp_synth.py K 0 1
 TRIALS=200 python exp_synth.py T 0 1
-TRIALS=30  python exp_synth.py O 0 1
-ALPHAS=0.10,0.05,0.01 OPT_ATTACK=1 ABLATE=1 python exp_real.py G 0 1
-ALPHAS=0.10,0.05,0.01 OPT_ATTACK=1 ABLATE=1 python exp_real.py H 0 1
+TRIALS=200 python exp_synth.py A 0 1
+TRIALS=200 python exp_synth.py C 0 1
+TRIALS=30 OPT_ITERS=240 python exp_synth.py O 0 1
+TRIALS=20  python exp_synth.py P 0 1
+ALPHAS=0.10,0.05,0.01 OPT_ATTACK=1 ABLATE=1 OPT_ITERS=120 python exp_real.py G 0 1
+ALPHAS=0.10,0.05,0.01 OPT_ATTACK=1 ABLATE=1 OPT_ITERS=120 python exp_real.py H 0 1
 python runtime.py
 python analyze.py synth G H
+python fig_data.py
 ```
 
 On a Slurm cluster, for example:

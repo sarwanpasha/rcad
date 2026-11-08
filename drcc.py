@@ -16,10 +16,10 @@ Algorithm (alternating):
 Threshold: the conformal rank r = ceil((1-alpha)(m - E + 1)) on the
 mass-corrected empirical distribution of W, where E is total estimated excess.
 """
-import math
+import math, os
 import numpy as np
 from statistics import NormalDist
-from scipy.stats import theilslopes
+from scipy.stats import theilslopes, betabinom
 
 _Z = NormalDist().inv_cdf
 TOL_K = 0.0           # transport-uncertainty slack in the scan, in units of the median fit residual
@@ -53,24 +53,56 @@ def _widen(e, frac=0.5):
     return np.unique(np.array(out))
 
 
-def _excess_scan(win, ref_t, B=20, delta=0.05, tol=0.0):
+SCAN = os.environ.get("DRCC_SCAN", "exact")   # "exact" (beta-binomial, default) or "normal"
+
+
+def _excess_scan(win, ref_t, B=20, delta=0.05, tol=0.0, scan=None):
+    """Binned excess scan on the bins of the transported reference ref_t.
+
+    Bin edges are order statistics of ref_t (B equal-count inner bins plus the two
+    open tails).  If ref_t and the clean window entries are exchangeable, the number
+    of clean window entries in a bin that holds a spacings of the n reference points
+    is beta-binomial(l, a, n + 1 - a) for l clean entries; with l = m (an upper bound
+    on the clean count) the upper-tail p-value is conservative, so each clean-only
+    bin is flagged with probability at most delta / (#bins).  The excess of a flagged
+    bin is its count minus the expected clean count, iterated to a fixed point in the
+    clean mass m - E."""
+    scan = SCAN if scan is None else scan
     m, n = win.size, ref_t.size
-    inner = _widen(np.quantile(ref_t, np.linspace(0, 1, B + 1)[1:-1]))
-    lo, hi = min(np.min(ref_t), inner[0]), max(np.max(ref_t), inner[-1])
+    rs = np.sort(ref_t)
+    if scan == "exact":
+        idx = np.unique(np.round(np.linspace(0, n - 1, B + 1)).astype(int))[1:-1]
+        inner = _widen(rs[idx])
+    else:
+        inner = _widen(np.quantile(ref_t, np.linspace(0, 1, B + 1)[1:-1]))
+    lo, hi = min(rs[0], inner[0]), max(rs[-1], inner[-1])
     edges = np.concatenate([[-np.inf], [lo], inner, [hi], [np.inf]])
     edges = np.unique(edges)
     cw = np.histogram(win, bins=edges)[0].astype(float)
     cr = np.histogram(ref_t, bins=edges)[0].astype(float)
     if tol > 0:
-        # transport uncertainty: a bin is compared with the reference mass of the bin
-        # widened by tol on each side, so a slightly misplaced steep feature of the
-        # score law (a cliff or an atom) is not read as excess mass
-        rs = np.sort(ref_t)
         lo_e = np.searchsorted(rs, edges[:-1] - tol, side="left")
         hi_e = np.searchsorted(rs, edges[1:] + tol, side="left")
         cr = np.maximum(cr, (hi_e - lo_e).astype(float))
-    pi = (cr + 0.5) / (n + 0.5 * cr.size)          # smoothed bin probability under the reference
-    z = _Z(1 - delta / cw.size) + Z_INFL
+    nb = cw.size
+    if scan == "exact":
+        # number of reference spacings covered by each bin (at least one: the open tails)
+        a_sp = np.maximum(cr, 1.0)
+        a_sp[-1] = 1.0                                   # (max R, inf) is one spacing
+        pi = a_sp / (n + 1.0)                            # mean clean probability of the bin
+        pv = np.where(cw > 0, betabinom.sf(cw - 1, m, a_sp, n + 1.0 - a_sp), 1.0)
+        flag = pv < delta / nb
+        E = 0.0
+        for _ in range(50):
+            lam = m - E
+            exc = np.where(flag, np.maximum(cw - lam * pi, 0.0), 0.0)
+            E_new = min(float(np.sum(exc)), 0.5 * m)
+            if abs(E_new - E) < 1e-6:
+                break
+            E = E_new
+        return edges, cw, exc, float(np.sum(exc))
+    pi = (cr + 0.5) / (n + 0.5 * nb)               # smoothed bin probability under the reference
+    z = _Z(1 - delta / nb) + Z_INFL
     E = 0.0
     for _ in range(20):                            # fixed point: expected clean count = (m - E) pi
         lam = m - E
@@ -78,16 +110,13 @@ def _excess_scan(win, ref_t, B=20, delta=0.05, tol=0.0):
         se = np.sqrt(exp_c * (1 - pi) + (lam ** 2) * pi * (1 - pi) / n)
         stat = (cw - exp_c) / np.maximum(se, 1e-9)
         exc = np.where(stat > z, np.maximum(cw - exp_c, 0.0), 0.0)
-        # the two open bins beyond the reference extremes: the normal approximation is
-        # useless there; use the exact exchangeable law of the number of clean window
-        # points beyond the extreme of n reference points, P(K >= k) = prod (l-i)/(n+l-i)
-        for jb in (0, cw.size - 1):
+        for jb in (0, nb - 1):
             k = int(cw[jb]); lam_i = max(int(round(lam)), 1)
             if k == 0:
                 exc[jb] = 0.0; continue
             i = np.arange(min(k, lam_i))
             pval = float(np.exp(np.sum(np.log((lam_i - i) / (n + lam_i - i))))) if k <= lam_i else 0.0
-            exc[jb] = max(cw[jb] - lam / (n + 1.0), 0.0) if pval < delta / cw.size else 0.0
+            exc[jb] = max(cw[jb] - lam / (n + 1.0), 0.0) if pval < delta / nb else 0.0
         E_new = float(np.sum(exc))
         if abs(E_new - E) < 1e-6:
             break
@@ -376,7 +405,7 @@ def theta_drcc_guard(ref, win, alpha, return_parts=False, lam=0.5, B=20, delta=0
     to 0.95) that leave no bin significantly short of the transported reference.
     The threshold is the largest admissible one."""
     a, b, edges, exc, E = decompose_mw(ref, win, lam=lam, B=B, delta=delta, **kw)
-    best = (_theta_from(win, edges, exc, alpha), E, int(np.sum(exc > 0)), "affine")
+    best = (_theta_from(win, edges, exc, alpha), E, int(np.sum(exc > 0)), "affine", edges, exc)
     qr = np.quantile(ref, knots)
     for st in starts:
         e2, x2, E2 = edges, exc, E
@@ -392,10 +421,22 @@ def theta_drcc_guard(ref, win, alpha, return_parts=False, lam=0.5, B=20, delta=0
                 continue
         th2 = _theta_from(win, e2, x2, alpha)
         if th2 > best[0]:
-            best = (th2, E2, int(np.sum(x2 > 0)), "pl_" + st)
+            best = (th2, E2, int(np.sum(x2 > 0)), "pl_" + st, e2, x2)
     if return_parts:
-        return best[0], dict(a=a, b=b, E=best[1], flagged=best[2], family=best[3])
+        return best[0], dict(a=a, b=b, E=best[1], flagged=best[2], family=best[3],
+                             weights=keep_weights(win, best[4], best[5]))
     return best[0]
+
+
+def keep_weights(win, edges, exc):
+    """Keep-weight of every window entry (in the original order)."""
+    bin_of = np.searchsorted(edges, win, side="right") - 1
+    w = np.ones(win.size)
+    for bb in np.flatnonzero(exc > 0):
+        sel = bin_of == bb
+        if sel.any():
+            w[sel] = max(0.0, 1.0 - exc[bb] / sel.sum())
+    return w
 
 
 def theta_drcc_union(ref, win, alpha, return_parts=False, lam=0.5, starts=("corrected",), B=20, delta=0.05,
@@ -405,21 +446,33 @@ def theta_drcc_union(ref, win, alpha, return_parts=False, lam=0.5, starts=("corr
     excess mass can only lower a threshold when the removed mass lies above it, so
     the maximum is valid whenever any one family contains the true drift."""
     a, b, edges, exc, E = decompose_mw(ref, win, lam=lam, B=B, delta=delta, **kw)
-    best = (_theta_from(win, edges, exc, alpha), E, int(np.sum(exc > 0)), "affine")
+    best = (_theta_from(win, edges, exc, alpha), E, int(np.sum(exc > 0)), "affine", edges, exc)
     if "smooth" in starts:
         e2, x2, E2 = decompose_smooth(ref, win, lam=lam, B=B, delta=delta, kappa=kw.get("kappa", 2.5))
         th2 = _theta_from(win, e2, x2, alpha)
         if th2 > best[0]:
-            best = (th2, E2, int(np.sum(x2 > 0)), "pl_smooth")
+            best = (th2, E2, int(np.sum(x2 > 0)), "pl_smooth", e2, x2)
     for st in [x for x in starts if x != "smooth"]:
         e2, x2, E2 = decompose_pl(ref, win, edges, exc, E, start=st, B=B, delta=delta,
                                   knots=knots_raw if st == "raw" else knots_corr)
         th2 = _theta_from(win, e2, x2, alpha)
         if th2 > best[0]:
-            best = (th2, E2, int(np.sum(x2 > 0)), "pl_" + st)
+            best = (th2, E2, int(np.sum(x2 > 0)), "pl_" + st, e2, x2)
     if return_parts:
-        return best[0], dict(a=a, b=b, E=best[1], flagged=best[2], family=best[3])
+        return best[0], dict(a=a, b=b, E=best[1], flagged=best[2], family=best[3],
+                             weights=keep_weights(win, best[4], best[5]))
     return best[0]
+
+
+def keep_weights(win, edges, exc):
+    """Keep-weight of every window entry (in the original order)."""
+    bin_of = np.searchsorted(edges, win, side="right") - 1
+    w = np.ones(win.size)
+    for bb in np.flatnonzero(exc > 0):
+        sel = bin_of == bb
+        if sel.any():
+            w[sel] = max(0.0, 1.0 - exc[bb] / sel.sum())
+    return w
 
 
 def theta_drcc(ref, win, alpha, return_parts=False, init="multiwindow", lam=0.5,
